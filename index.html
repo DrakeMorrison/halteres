@@ -132,6 +132,32 @@
   .plan-row { display: flex; justify-content: space-between; gap: 0.6rem; font-size: 0.72rem; }
   .plan-row .plan-what { color: var(--text-dim); text-align: right; }
 
+  /* ── Nudge card ─────────────────────────────────────────────── */
+  .nudge-card {
+    border: 1px solid var(--orange);
+    background: var(--surface);
+    padding: 0.8rem 0.9rem;
+    margin-bottom: 1rem;
+  }
+  .nudge-title {
+    font-family: var(--display);
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--orange);
+    margin-bottom: 0.35rem;
+  }
+  .nudge-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    margin-top: 0.35rem;
+    flex-wrap: wrap;
+  }
+
   /* ── Exercise cards ─────────────────────────────────────────── */
   .ex-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; margin-bottom: 0.6rem; }
   .ex-card {
@@ -457,6 +483,8 @@
     <div class="plan-rows" id="plan-rows"></div>
   </div>
 
+  <div class="nudge-card" id="nudge-card" style="display:none"></div>
+
   <div class="ex-cards">
     <div class="ex-card" id="card-sw">
       <div class="ex-head">
@@ -520,9 +548,11 @@
     <div class="settings-note">
       Simple &amp; Sinister: 100 one-hand swings (10 sets of 10) and 10 Turkish
       get-ups (5 per side), most days, without the clock. Progress by
-      step-loading — move one set at a time to the next bell until all ten are
-      there, then it becomes your bell. Test rarely: 100 swings in 5:00 and
-      10 get-ups in 10:00, same bell, is the standard.
+      step-loading in pairs — move two sets at a time to the next bell (2,
+      then 4, then 6…) until all ten are there, then it becomes your bell.
+      After four weeks at the same load with at least 80% of days practiced,
+      the app nudges you to add the next pair. Test rarely: 100 swings in
+      5:00 and 10 get-ups in 10:00, same bell, is the standard.
     </div>
 
     <div class="settings-section-title">Bells (kg)</div>
@@ -540,6 +570,36 @@
       <label>Custom — swings kg / get-ups kg</label>
       <input type="number" class="half" id="goal-sw" min="1" step="any" onchange="goalChanged()">
       <input type="number" class="half" id="goal-tgu" min="1" step="any" onchange="goalChanged()">
+    </div>
+
+    <div class="settings-section-title">Beeminder</div>
+    <div class="settings-note">
+      Posts a datapoint per logged session, straight from this browser to
+      beeminder.com — edits re-post it, deletes zero it out, offline sessions
+      queue until you're back. Get your token at
+      beeminder.com/api/v1/auth_token.json (it stays in this browser only).
+      Leave any field empty to disable.
+    </div>
+    <div class="settings-row">
+      <label>Username / goal slug</label>
+      <input type="text" class="half" id="bee-user" autocomplete="off" placeholder="username" onchange="beeChanged()">
+      <input type="text" class="half" id="bee-slug" autocomplete="off" placeholder="goal" onchange="beeChanged()">
+    </div>
+    <div class="settings-row">
+      <label for="bee-token">Auth token</label>
+      <input type="text" id="bee-token" autocomplete="off" onchange="beeChanged()">
+    </div>
+    <div class="settings-row">
+      <label for="bee-metric">Datapoint value</label>
+      <select id="bee-metric" onchange="beeChanged()">
+        <option value="session">1 per session</option>
+        <option value="swings">swing reps</option>
+        <option value="tonnage">tonnage (kg)</option>
+      </select>
+    </div>
+    <div class="settings-row btn-group">
+      <button class="btn btn-tiny" onclick="syncBee()">⇄ Sync now</button>
+      <span class="settings-note" id="bee-status" style="margin:0"></span>
     </div>
 
     <div class="settings-section-title">Data</div>
@@ -602,6 +662,9 @@
 const DB_KEY = 'halteres_sessions';
 const CFG_KEY = 'halteres_config';
 const THEME_KEY = 'halteres_theme';
+const BEE_KEY = 'halteres_beeminder';
+const BEEQ_KEY = 'halteres_beeledger';
+const BEE_METRICS = ['session', 'swings', 'tonnage'];
 
 const EX_IDS = ['sw', 'tgu'];
 const EX = {
@@ -609,6 +672,13 @@ const EX = {
   tgu: { name: 'get-ups', cls: 'ex-tgu', total: 10, unit: 'reps', repsPer: 1,  testLimit: 600 },
 };
 const GOAL_PRESETS = { simple: { sw: 32, tgu: 32 }, sinister: { sw: 48, tgu: 48 } };
+
+// Step-loading moves in pairs: 2 sets/reps at the heavier bell, then 4, 6…
+const STEP = 2;
+// Nudge to move up after this many days at the same load, provided
+// attendance over the window was at least this fraction of days.
+const NUDGE_WINDOW = 28;
+const NUDGE_ADHERENCE = 0.8;
 
 // ── Storage (meridian-style) ─────────────────────────────────────
 // Mobile WebKit can detach localStorage while the app is suspended in the
@@ -713,8 +783,40 @@ function sanitizeCfg(raw) {
   return { bells: bells.length ? bells : [16, 24, 32], goal };
 }
 
+function sanitizeBee(raw) {
+  const str = v => typeof v === 'string' ? v.trim() : '';
+  return {
+    user: str(raw && raw.user),
+    token: str(raw && raw.token),
+    slug: str(raw && raw.slug),
+    metric: raw && BEE_METRICS.includes(raw.metric) ? raw.metric : 'session',
+  };
+}
+
+// The Beeminder ledger: one item per session ever posted (or queued), keyed
+// by requestid. `synced: false` means it still needs a POST — Beeminder
+// upserts by requestid, so re-posting after an edit updates the datapoint
+// instead of duplicating it.
+function sanitizeBeeLedger(raw) {
+  if (!Array.isArray(raw)) return [];
+  const byRid = new Map();
+  for (const d of raw) {
+    if (!d || typeof d !== 'object' || typeof d.rid !== 'string' || !d.rid) continue;
+    const value = finiteOrNull(d.value), ts = finiteOrNull(d.ts);
+    if (value == null || ts == null) continue;
+    byRid.set(d.rid, {
+      rid: d.rid, value, ts,
+      comment: typeof d.comment === 'string' ? d.comment : '',
+      synced: !!d.synced,
+    });
+  }
+  return [...byRid.values()];
+}
+
 let sessions = sanitizeSessions(loadJSON(DB_KEY, []));
 let cfg = sanitizeCfg(loadJSON(CFG_KEY, null));
+let bee = sanitizeBee(loadJSON(BEE_KEY, null));
+let beeLedger = sanitizeBeeLedger(loadJSON(BEEQ_KEY, []));
 
 function saveSessions() {
   sessions.sort((a, b) => a.t - b.t);
@@ -722,6 +824,12 @@ function saveSessions() {
 }
 function saveCfg() {
   storageSet(CFG_KEY, JSON.stringify(cfg));
+}
+function saveBee() {
+  storageSet(BEE_KEY, JSON.stringify(bee));
+}
+function saveBeeLedger() {
+  storageSet(BEEQ_KEY, JSON.stringify(beeLedger));
 }
 
 // ── Time helpers ─────────────────────────────────────────────────
@@ -812,7 +920,8 @@ function planFromHistory(ex) {
     const nb = nextBell(base);
     let heavy = 0;
     if (nb != null) for (const p of parts) if (p.w >= nb) heavy += p.n;
-    return { base, heavy: Math.min(heavy, EX[ex].total) };
+    heavy = Math.min(heavy, EX[ex].total);
+    return { base, heavy: heavy - (heavy % STEP) }; // snap to the pair grid
   }
   return { base: cfg.bells[0], heavy: 0 };
 }
@@ -911,9 +1020,116 @@ function logSession() {
   document.getElementById('test-tgu-time').value = '';
   if (testMode) toggleTest();
   saveSessions();
+  queueBeeUpsert(entry);
   reseedPlans();
   renderAll();
 }
+
+// ── Beeminder sync ───────────────────────────────────────────────
+// One-way: sessions become datapoints. The requestid is derived from the
+// session id, so a session maps to exactly one datapoint for life — edits
+// re-post (upsert), deletes re-post with value 0. Unsent items wait in the
+// ledger until the network and Beeminder cooperate.
+function beeConfigured() { return !!(bee.user && bee.token && bee.slug); }
+
+function beeRid(s) { return 'hal' + String(s.id).replace(/\D/g, '').slice(0, 30); }
+
+function beeValue(s) {
+  if (bee.metric === 'swings') return s.sw.reduce((sum, p) => sum + p.n * EX.sw.repsPer, 0);
+  if (bee.metric === 'tonnage') return EX_IDS.reduce((sum, x) => sum + workTonnage(x, s[x]), 0);
+  return 1;
+}
+
+function beeComment(s) {
+  const bits = [];
+  for (const x of EX_IDS) if (s[x].length) bits.push(EX[x].name + ' ' + fmtWork(x, s[x]));
+  if (s.test) {
+    const times = [];
+    if (s.swT != null) times.push(fmtSecs(s.swT));
+    if (s.tguT != null) times.push(fmtSecs(s.tguT));
+    bits.push('test ' + (times.join(' · ') || ''));
+  }
+  if (s.note) bits.push(s.note);
+  return 'halteres: ' + bits.join(' · ');
+}
+
+function queueBeeUpsert(s) {
+  if (!beeConfigured()) return;
+  const item = { rid: beeRid(s), value: beeValue(s), ts: Math.floor(s.t / 1000), comment: beeComment(s), synced: false };
+  beeLedger = beeLedger.filter(x => x.rid !== item.rid).concat(item);
+  saveBeeLedger();
+  syncBee();
+}
+
+function queueBeeDelete(s) {
+  const rid = beeRid(s);
+  const item = beeLedger.find(x => x.rid === rid);
+  if (!item) return;
+  if (!item.synced) {
+    // never reached Beeminder — just forget it
+    beeLedger = beeLedger.filter(x => x.rid !== rid);
+  } else {
+    item.value = 0;
+    item.comment = 'halteres: session deleted';
+    item.synced = false;
+  }
+  saveBeeLedger();
+  syncBee();
+}
+
+let beeSyncing = false;
+let beeStatus = '';
+
+function renderBeeStatus() {
+  const el = document.getElementById('bee-status');
+  if (!el) return;
+  if (!beeConfigured()) { el.textContent = 'not configured'; return; }
+  const pending = beeLedger.filter(x => !x.synced).length;
+  el.textContent = (pending ? pending + ' pending · ' : '') + (beeStatus || 'idle');
+}
+
+async function syncBee() {
+  renderBeeStatus();
+  if (beeSyncing || !beeConfigured() || !navigator.onLine) return;
+  const pending = beeLedger.filter(x => !x.synced);
+  if (!pending.length) return;
+  beeSyncing = true;
+  beeStatus = 'syncing…';
+  renderBeeStatus();
+  try {
+    for (const item of pending) {
+      const res = await fetch('https://www.beeminder.com/api/v1/users/' + encodeURIComponent(bee.user) +
+        '/goals/' + encodeURIComponent(bee.slug) + '/datapoints.json', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          auth_token: bee.token,
+          value: String(item.value),
+          comment: item.comment,
+          timestamp: String(item.ts),
+          requestid: item.rid,
+        }),
+      });
+      if (!res.ok) {
+        beeStatus = res.status === 401 ? '✕ bad auth token'
+          : res.status === 404 ? '✕ user or goal not found'
+          : '✕ HTTP ' + res.status + ' — will retry';
+        beeSyncing = false;
+        renderBeeStatus();
+        return;
+      }
+      item.synced = true;
+      saveBeeLedger();
+    }
+    beeStatus = '✓ synced';
+  } catch (e) {
+    beeStatus = '✕ unreachable — will retry';
+  }
+  beeSyncing = false;
+  renderBeeStatus();
+}
+
+window.addEventListener('online', syncBee);
 
 // ── Rendering ────────────────────────────────────────────────────
 const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -952,6 +1168,75 @@ function renderToday() {
   document.getElementById('plan-rows').innerHTML = planHtml;
 }
 
+// ── Move-up nudge ────────────────────────────────────────────────
+// Four weeks at the same load with ≥80% attendance means the load is stale —
+// time to move the next pair of sets to the heavier bell. "Same load" is
+// detected from the log itself: any change in an exercise's logged work
+// (a pair added, a bell graduated, even a step back) resets its clock.
+function lastWorkSig(ex) {
+  for (let i = sessions.length - 1; i >= 0; i--) {
+    if (sessions[i][ex].length) return workToStr(sessions[i][ex]);
+  }
+  return null;
+}
+
+function lastChangeDay(ex) {
+  let prevSig = null, changeDay = null;
+  for (const s of sessions) {
+    if (!s[ex].length) continue;
+    const sig = workToStr(s[ex]);
+    if (prevSig == null || sig !== prevSig) changeDay = dayKey(s.t);
+    prevSig = sig;
+  }
+  return changeDay;
+}
+
+function adherence(todayK) {
+  const daySet = new Set(sessions.map(s => dayKey(s.t)));
+  let recent = 0;
+  for (const dk of daySet) {
+    const d = dayDiff(dk, todayK);
+    if (d >= 0 && d < NUDGE_WINDOW) recent++;
+  }
+  return recent / NUDGE_WINDOW;
+}
+
+function applyNudge(ex) {
+  sel[ex].heavy = Math.min(EX[ex].total, sel[ex].heavy + STEP);
+  renderForm();
+  renderToday();
+  renderNudge();
+}
+
+function renderNudge() {
+  const card = document.getElementById('nudge-card');
+  const todayK = dayKey(Date.now());
+  const adh = adherence(todayK);
+  let lines = '';
+  if (adh >= NUDGE_ADHERENCE) {
+    for (const x of EX_IDS) {
+      const chg = lastChangeDay(x);
+      if (chg == null || dayDiff(chg, todayK) < NUDGE_WINDOW) continue;
+      const nb = nextBell(sel[x].base);
+      if (nb == null) continue;
+      // already bumped in the form (or nudge applied) — nothing to nag about
+      const sig = lastWorkSig(x);
+      if (sig == null || workToStr(planToWork(x, sel[x])) !== sig) continue;
+      const wks = Math.floor(dayDiff(chg, todayK) / 7);
+      lines += '<div class="nudge-line"><span><span class="' + EX[x].cls + '">' + EX[x].name + '</span> — ' +
+        wks + ' weeks at ' + esc(fmtWork(x, planToWork(x, sel[x]))) + '</span>' +
+        '<button class="btn btn-tiny" onclick="applyNudge(\'' + x + '\')">＋' + STEP + ' @' + nb + 'kg</button></div>';
+    }
+  }
+  if (lines) {
+    card.style.display = '';
+    card.innerHTML = '<div class="nudge-title">Time to load — ' + Math.round(adh * 100) +
+      '% of the last 4 weeks</div>' + lines;
+  } else {
+    card.style.display = 'none';
+  }
+}
+
 function renderForm() {
   for (const x of EX_IDS) {
     document.getElementById('card-' + x).classList.toggle('skipped', !incl[x]);
@@ -979,10 +1264,10 @@ function renderForm() {
       row.className = 'step-row';
       const minus = document.createElement('button');
       minus.type = 'button'; minus.className = 'step-btn'; minus.textContent = '−';
-      minus.onclick = () => { sel[x].heavy = Math.max(0, sel[x].heavy - 1); renderForm(); renderToday(); };
+      minus.onclick = () => { sel[x].heavy = Math.max(0, sel[x].heavy - STEP); renderForm(); renderToday(); renderNudge(); };
       const plus = document.createElement('button');
       plus.type = 'button'; plus.className = 'step-btn'; plus.textContent = '＋';
-      plus.onclick = () => { sel[x].heavy = Math.min(EX[x].total, sel[x].heavy + 1); renderForm(); renderToday(); };
+      plus.onclick = () => { sel[x].heavy = Math.min(EX[x].total, sel[x].heavy + STEP); renderForm(); renderToday(); renderNudge(); };
       const label = document.createElement('span');
       label.className = 'step-label';
       label.innerHTML = (sel[x].heavy > 0 ? '<span class="hv">' + sel[x].heavy + '</span>' : '0') +
@@ -1130,6 +1415,7 @@ function renderLog() {
     row.querySelector('.l-del').onclick = (ev) => {
       ev.stopPropagation();
       if (!confirm('Delete this session?')) return;
+      queueBeeDelete(s);
       sessions = sessions.filter(x => x.id !== s.id);
       saveSessions();
       reseedPlans();
@@ -1150,6 +1436,7 @@ function renderLog() {
 
 function renderAll() {
   renderToday();
+  renderNudge();
   renderForm();
   renderProgress();
   renderHorizon();
@@ -1183,6 +1470,20 @@ function recoverFailedReads() {
   if (toRecover.has(CFG_KEY) && !pendingWrites.has(CFG_KEY)) {
     cfg = sanitizeCfg(loadJSON(CFG_KEY, null));
   }
+  if (toRecover.has(BEE_KEY) && !pendingWrites.has(BEE_KEY)) {
+    bee = sanitizeBee(loadJSON(BEE_KEY, null));
+  }
+  if (toRecover.has(BEEQ_KEY)) {
+    // union stored ledger with in-memory items; in-memory wins per rid
+    // (it holds anything queued since load, including fresher edits)
+    const stored = sanitizeBeeLedger(loadJSON(BEEQ_KEY, []));
+    const have = new Set(beeLedger.map(x => x.rid));
+    const missing = stored.filter(x => !have.has(x.rid));
+    if (missing.length) {
+      beeLedger = beeLedger.concat(missing);
+      saveBeeLedger();
+    }
+  }
   if (toRecover.has(THEME_KEY) && !pendingWrites.has(THEME_KEY)) {
     setTheme(storageGet(THEME_KEY) || 'auto');
   }
@@ -1192,6 +1493,7 @@ function resyncAfterResume() {
   recoverFailedReads();
   flushPendingWrites();
   renderAll();
+  syncBee();
 }
 window.addEventListener('pageshow', (e) => { if (e.persisted) resyncAfterResume(); });
 document.addEventListener('visibilitychange', () => {
@@ -1239,6 +1541,7 @@ function saveEdit() {
   s.tguT = s.test ? parseTime(document.getElementById('edit-tgu-time').value) : null;
   s.note = document.getElementById('edit-note').value.trim();
   saveSessions();
+  queueBeeUpsert(s);
   closeEdit();
   reseedPlans();
   renderAll();
@@ -1246,6 +1549,8 @@ function saveEdit() {
 
 function deleteEdit() {
   if (!confirm('Delete this session?')) return;
+  const s = sessions.find(x => x.id === editId);
+  if (s) queueBeeDelete(s);
   sessions = sessions.filter(x => x.id !== editId);
   saveSessions();
   closeEdit();
@@ -1259,7 +1564,23 @@ function openSettings() {
   document.getElementById('goal-sw').value = cfg.goal.sw;
   document.getElementById('goal-tgu').value = cfg.goal.tgu;
   markGoalButtons();
+  document.getElementById('bee-user').value = bee.user;
+  document.getElementById('bee-slug').value = bee.slug;
+  document.getElementById('bee-token').value = bee.token;
+  document.getElementById('bee-metric').value = bee.metric;
+  renderBeeStatus();
   document.getElementById('settings-overlay').classList.add('visible');
+}
+
+function beeChanged() {
+  bee = sanitizeBee({
+    user: document.getElementById('bee-user').value,
+    slug: document.getElementById('bee-slug').value,
+    token: document.getElementById('bee-token').value,
+    metric: document.getElementById('bee-metric').value,
+  });
+  saveBee();
+  syncBee();
 }
 function closeSettings() {
   document.getElementById('settings-overlay').classList.remove('visible');
@@ -1380,9 +1701,11 @@ function handleImportFile(file) {
 }
 
 function clearAll() {
-  if (!confirm('Delete ALL ' + sessions.length + ' sessions? Export first if you want a backup.')) return;
+  if (!confirm('Delete ALL ' + sessions.length + ' sessions? Export first if you want a backup. (Datapoints already on Beeminder are left alone.)')) return;
   sessions = [];
+  beeLedger = [];
   saveSessions();
+  saveBeeLedger();
   reseedPlans();
   renderAll();
 }
@@ -1433,6 +1756,7 @@ if ('serviceWorker' in navigator) {
 
 setTheme(storageGet(THEME_KEY) || 'auto');
 renderAll();
+syncBee();
 </script>
 </body>
 </html>
