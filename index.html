@@ -550,7 +550,7 @@
       get-ups (5 per side), most days, without the clock. Progress by
       step-loading in pairs — move two sets at a time to the next bell (2,
       then 4, then 6…) until all ten are there, then it becomes your bell.
-      After four weeks at the same load with at least 80% of days practiced,
+      After four weeks at the same load with at least 70% of days practiced,
       the app nudges you to add the next pair. Test rarely: 100 swings in
       5:00 and 10 get-ups in 10:00, same bell, is the standard.
     </div>
@@ -678,7 +678,7 @@ const STEP = 2;
 // Nudge to move up after this many days at the same load, provided
 // attendance over the window was at least this fraction of days.
 const NUDGE_WINDOW = 28;
-const NUDGE_ADHERENCE = 0.8;
+const NUDGE_ADHERENCE = 0.7;
 
 // ── Storage (meridian-style) ─────────────────────────────────────
 // Mobile WebKit can detach localStorage while the app is suspended in the
@@ -1169,7 +1169,7 @@ function renderToday() {
 }
 
 // ── Move-up nudge ────────────────────────────────────────────────
-// Four weeks at the same load with ≥80% attendance means the load is stale —
+// Four weeks at the same load with ≥70% attendance means the load is stale —
 // time to move the next pair of sets to the heavier bell. "Same load" is
 // detected from the log itself: any change in an exercise's logged work
 // (a pair added, a bell graduated, even a step back) resets its clock.

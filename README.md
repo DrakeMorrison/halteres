@@ -17,14 +17,14 @@ Pavel Tsatsouline's Simple & Sinister, done most days without a clock:
 
 Progress happens by **step-loading in pairs**: move two sets at a time from your bell to the next bell up — 2, then 4, then 6… When all ten sets are at the heavier bell, it *is* your bell, and the counter starts again toward the next one. The app's session form is exactly that — a bell picker plus a "sets at the next bell" counter, prefilled from your last session so the default action is *do what you did last time*, and progression is one tap on `+` (which adds a pair).
 
-And when you've been at the same load for **four weeks with at least 80% of days practiced**, a notice appears telling you it's time to move up — with a one-tap button that adds the next pair to today's plan. Any change in your logged work (a pair added, a bell graduated, even a step back) resets that clock.
+And when you've been at the same load for **four weeks with at least 70% of days practiced**, a notice appears telling you it's time to move up — with a one-tap button that adds the next pair to today's plan. Any change in your logged work (a pair added, a bell graduated, even a step back) resets that clock.
 
 Test rarely. The standard is 100 swings in 5:00 and 10 get-ups in 10:00 with the goal bell — **Simple** at 32 kg, **Sinister** at 48 kg (both configurable, so the women's standards or any custom goal work too).
 
 ## Features
 
 - **Today card** — practiced or ready, days since the last session, and the plan for today's session
-- **Move-up nudge** — after 4 weeks at the same load with ≥80% attendance, a notice with a one-tap "+2 @next bell" button
+- **Move-up nudge** — after 4 weeks at the same load with ≥70% attendance, a notice with a one-tap "+2 @next bell" button
 - **One-tap logging** — bell chips per exercise, a step-load counter, an optional timed-test mode with m:ss entries, and a note
 - **Progression cards** — current bell → next bell with a 10-set progress bar, best full session, last test time, and the goal standard; a banner when both standards are met
 - **Horizon strip** — the last 28 days at a glance: full sessions, partial sessions, and test days
